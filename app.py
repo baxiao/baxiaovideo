@@ -3,113 +3,97 @@ import os
 import json
 import re
 from openai import OpenAI
-from google import genai
-from google.genai import types
 
-# --- 1. 配置读取 ---
+# --- 1. 安全配置 (Secrets 读取) ---
 try:
     DEEPSEEK_KEY = st.secrets["DEEPSEEK_API_KEY"]
-    GOOGLE_KEY = st.secrets["GOOGLE_API_KEY"]
 except Exception:
-    st.error("❌ 请先在 Streamlit Secrets 中配置 DEEPSEEK_API_KEY 和 GOOGLE_API_KEY")
+    st.error("❌ 未在 Secrets 中找到 DEEPSEEK_API_KEY，请检查配置。")
     st.stop()
 
-# 初始化客户端
+# 初始化 DeepSeek 客户端
 ds_client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
-google_client = genai.Client(api_key=GOOGLE_KEY)
 
-st.set_page_config(page_title="视频工厂-自适应版", layout="wide")
-st.title("🎬 视频全自动生产流水线")
+st.set_page_config(page_title="短视频脚本策划专家", layout="wide")
+st.title("📑 短视频全自动脚本策划器")
+st.caption("专注文案生成、分镜描述与运镜脚本设计")
 
-# --- 2. 自动检测可用模型 ---
-with st.sidebar:
-    st.header("系统状态检查")
+# --- 2. 核心逻辑函数 ---
+
+def get_ai_script(topic, scene_count):
+    """调用 DeepSeek 生成深度分镜脚本数据"""
+    prompt = f"""
+    针对主题“{topic}”，策划一个包含 {scene_count} 个镜头的短视频脚本。
+    要求：
+    1. 逻辑严密，适合拍摄或AI视频生成。
+    2. 严格以 JSON 数组格式返回。
+    3. 每个对象包含字段：
+       - "scene_no": 序号 (居中展示),
+       - "text": 旁白/文案内容,
+       - "visual": 画面详细描述 (用于给AI绘图参考),
+       - "camera": 运镜指令 (如: 缓慢推近, 环绕上升, 侧向平移).
+    
+    注意：只输出 JSON 数据，不要任何解释。
+    """
     try:
-        # 获取用户账号下所有可用的模型列表
-        all_models = [m.name for m in google_client.models.list()]
-        img_models = [m for m in all_models if "imagen" in m.lower() or "image" in m.lower()]
-        vid_models = [m for m in all_models if "veo" in m.lower()]
-        
-        st.success("✅ API 连接正常")
-        st.write("**可用绘图模型:**", img_models if img_models else "未找到")
-        st.write("**可用视频模型:**", vid_models if vid_models else "未找到")
-        
-        # 自动挑选最优先的绘图模型
-        SELECTED_IMG_MODEL = img_models[0] if img_models else 'imagen-3.0-generate-001'
-        # 自动挑选视频模型
-        SELECTED_VID_MODEL = vid_models[0] if vid_models else 'veo-2.0'
-    except Exception as e:
-        st.error(f"无法获取模型列表: {e}")
-        SELECTED_IMG_MODEL = 'imagen-3.0-generate-001'
-        SELECTED_VID_MODEL = 'veo-2.0'
-
-# --- 3. 核心功能函数 ---
-
-def get_ai_script(topic):
-    """DeepSeek 生成并清洗 JSON"""
-    prompt = f"针对'{topic}'生成3个短视频分镜JSON，包含text(文案), visual(画图提示词), camera(运镜)。只输出JSON。"
-    try:
-        response = ds_client.chat.completions.create(model="deepseek-chat", messages=[{"role":"user", "content":prompt}])
-        raw = response.choices[0].message.content
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        return json.loads(match.group(0)) if match else None
-    except: return None
-
-def generate_image_auto(desc):
-    """使用探测到的模型进行绘图"""
-    try:
-        # 尝试使用侧边栏自动探测到的模型名
-        res = google_client.models.generate_images(
-            model=SELECTED_IMG_MODEL, 
-            prompt=desc, 
-            config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="16:9")
+        response = ds_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}]
         )
-        return res.generated_images[0].image_bytes
+        raw_content = response.choices[0].message.content
+        
+        # 强力清洗 JSON 杂质
+        match = re.search(r'\[.*\]', raw_content, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        else:
+            return json.loads(raw_content.strip())
     except Exception as e:
-        st.error(f"绘图失败 ({SELECTED_IMG_MODEL}): {e}")
+        st.error(f"脚本生成失败: {e}")
         return None
 
-def generate_video_auto(img_bytes, cam):
-    """使用探测到的模型生成视频"""
-    try:
-        res = google_client.models.generate_content(
-            model=SELECTED_VID_MODEL, 
-            contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"), f"Motion: {cam}"]
-        )
-        return res.candidates[0].content.parts[0].inline_data.data
-    except: return None
+# --- 3. 界面交互 ---
 
-# --- 4. 运行界面 ---
+with st.sidebar:
+    st.header("脚本参数设置")
+    scene_num = st.slider("分镜镜头数量", min_value=1, max_value=10, value=4)
+    st.info("💡 提示：暂停了图片和视频生成，专注文案创作。")
 
-topic = st.text_input("视频主题：", "小蝌蚪找妈妈")
+user_topic = st.text_input("请输入视频主题（关键词或短句）：", placeholder="例如：讲述一个关于孤独与勇气的科幻故事")
 
-if st.button("🚀 开始生产"):
-    with st.spinner("1. 正在构思脚本..."):
-        scenes = get_ai_script(topic)
-    
-    if scenes:
-        for i, s in enumerate(scenes):
-            st.divider()
-            c1, c2, c3 = st.columns([1, 2, 2])
-            with c1:
-                st.info(f"**分镜 {i+1}**\n\n{s['text']}")
-                st.caption(f"运镜: {s['camera']}")
+if st.button("🚀 开始策划脚本"):
+    if not user_topic:
+        st.warning("请先输入主题内容。")
+    else:
+        with st.spinner("DeepSeek 正在构思您的视频脚本..."):
+            scenes = get_ai_script(user_topic, scene_num)
+        
+        if scenes:
+            st.success(f"✅ 脚本生成完成，共计 {len(scenes)} 个镜头。")
             
-            img_data = None
-            with c2:
-                with st.spinner("2. 绘图中..."):
-                    img_data = generate_image_auto(s['visual'])
-                    if img_data: 
-                        st.image(img_data)
-                        st.download_button("下图片", img_data, f"img_{i}.jpg", key=f"i{i}")
+            # 使用表格形式展示，方便一眼扫视
+            for i, scene in enumerate(scenes):
+                st.markdown(f"### --- 分镜 {scene.get('scene_no', i+1)} ---")
+                
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    st.markdown("**🎙️ 旁白文案 (点击下方可复制)**")
+                    # 使用 text_area 方便用户全选复制
+                    st.text_area("文案内容", value=scene['text'], height=100, key=f"text_{i}")
+                    
+                    st.markdown("**🎥 运镜脚本**")
+                    st.code(scene['camera'], language="text")
 
-            with c3:
-                if img_data:
-                    with st.spinner("3. 渲染视频..."):
-                        vid_data = generate_video_auto(img_data, s['camera'])
-                        if vid_data: 
-                            st.video(vid_data)
-                            st.download_button("下视频", vid_data, f"vid_{i}.mp4", key=f"v{i}")
-                        else: st.warning(f"当前 Key 暂无 {SELECTED_VID_MODEL} 视频权限")
-
-        st.balloons()
+                with col2:
+                    st.markdown("**🖼️ 画面描述 (分镜镜头)**")
+                    # 这里是原来的绘图描述，保留用于给用户参考
+                    st.text_area("视觉参考描述", value=scene['visual'], height=150, key=f"vis_{i}")
+            
+            # 提供整体脚本下载
+            full_script_text = ""
+            for s in scenes:
+                full_script_text += f"分镜{s.get('scene_no', '')}\n文案：{s['text']}\n画面：{s['visual']}\n运镜：{s['camera']}\n\n"
+            
+            st.download_button("📥 导出完整脚本 (TXT)", full_script_text, f"{user_topic}_脚本.txt")
+            st.balloons()
