@@ -2,45 +2,60 @@ import streamlit as st
 import os
 import requests
 import json
+import re
+import time
 from openai import OpenAI
 from google import genai
 from google.genai import types
 
-# --- 1. 配置读取 (Streamlit Secrets) ---
-DEEPSEEK_KEY = st.secrets["DEEPSEEK_API_KEY"]
-GOOGLE_KEY = st.secrets["GOOGLE_API_KEY"]
+# --- 1. 配置读取 (从 Streamlit Secrets 加载) ---
+try:
+    DEEPSEEK_KEY = st.secrets["DEEPSEEK_API_KEY"]
+    GOOGLE_KEY = st.secrets["GOOGLE_API_KEY"]
+except Exception as e:
+    st.error("❌ 未在 Secrets 中找到 API Key，请检查配置。")
+    st.stop()
 
 # 初始化 API 客户端
 ds_client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
-# 这里的 Nano Banana 和 Veo 统称为 Google GenAI 功能
 google_client = genai.Client(api_key=GOOGLE_KEY)
 
-st.set_page_config(page_title="真实全自动视频工厂", layout="wide")
+st.set_page_config(page_title="AI视频全链路工厂", layout="wide")
 st.title("🎬 真实全自动视频工厂")
+st.caption("集成 DeepSeek 文案、Nano Banana 绘图、Veo 视频生成")
 
-# --- 2. 核心执行函数 ---
+# --- 2. 核心逻辑函数 ---
 
 def get_ai_script(topic):
-    """调用 DeepSeek 生成分镜脚本数据"""
+    """调用 DeepSeek 生成并清洗 JSON 脚本"""
     prompt = f"""
     请为主题“{topic}”创作短视频脚本。
-    必须严格以 JSON 数组格式返回，不要包含代码块标记或解释文字。
-    每个对象包含：
-    "text": 文案,
-    "visual": 详细画面描述（用于AI绘图）,
-    "camera": 运镜指令（英文，如 Pan left, Zoom in）
+    必须严格返回一个 JSON 数组，不要任何开场白。
+    数组内每个对象包含：
+    "text": (短视频旁白文案),
+    "visual": (详细的画面描述，英文为主),
+    "camera": (运镜指令，如: Pan left, Zoom in, Cinematic motion)
     """
     response = ds_client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}]
     )
-    # 清理可能存在的 markdown 标签
-    content = response.choices[0].message.content.replace('```json', '').replace('```', '').strip()
-    return json.loads(content)
+    raw_content = response.choices[0].message.content
+    
+    # 【核心修复】使用正则表达式提取 JSON 数组部分，防止 Expecting value 报错
+    try:
+        match = re.search(r'\[.*\]', raw_content, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+        else:
+            clean_json = raw_content.strip()
+        return json.loads(clean_json)
+    except Exception as e:
+        st.error(f"解析脚本失败。AI返回内容：{raw_content}")
+        return None
 
 def generate_image_real(visual_desc):
-    """调用 Nano Banana (Imagen 3) 生成图片字节流"""
-    # 也可以使用 'imagen-3.0-fast-001' 速度更快
+    """调用 Nano Banana (Imagen 3) 生成图片流"""
     response = google_client.models.generate_images(
         model='imagen-3.0-generate-001',
         prompt=visual_desc,
@@ -53,58 +68,67 @@ def generate_image_real(visual_desc):
     return response.generated_images[0].image_bytes
 
 def generate_video_real(image_bytes, camera_movement):
-    """调用 Veo 生成视频字节流"""
-    # 使用 Google 最新视频模型
+    """调用 Veo 生成视频流"""
+    # 结合图片和运镜指令发送给视频模型
     response = google_client.models.generate_content(
         model='veo-2.0', 
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-            f"Generate a video with this movement: {camera_movement}"
+            f"Generate a cinematic video based on this image with movement: {camera_movement}"
         ]
     )
-    # 获取视频二进制数据
     return response.candidates[0].content.parts[0].inline_data.data
 
-# --- 3. 页面交互逻辑 ---
+# --- 3. 页面交互 ---
 
-user_topic = st.text_input("请输入视频主题：", "小蝌蚪找妈妈")
+user_topic = st.text_input("请输入视频主题（如：赛博朋克风的成都街头）：")
 
-if st.button("🚀 启动真实生成任务"):
+if st.button("🚀 开启全自动化生产线"):
     if not user_topic:
-        st.error("请输入主题后再启动")
+        st.warning("请先输入主题内容")
     else:
-        try:
-            # 第一步：DeepSeek 生成脚本列表
-            with st.spinner("1. DeepSeek 正在策划分镜脚本..."):
-                scenes = get_ai_script(user_topic)
-                st.success(f"策划完成，共计 {len(scenes)} 个分镜。")
-
-            # 第二步：循环生成图片和视频
-            for i, scene in enumerate(scenes):
-                st.divider()
-                st.subheader(f"分镜 {i+1}")
-                
-                col1, col2, col3 = st.columns([1, 2, 2])
-                
-                with col1:
-                    st.write("**文案内容：**")
-                    st.info(scene['text'])
-                    st.write(f"**运镜：** {scene['camera']}")
-
-                with col2:
-                    with st.spinner("2. Nano Banana 正在绘图..."):
-                        img_bytes = generate_image_real(scene['visual'])
-                        st.image(img_bytes, caption="AI 生成的分镜图")
-                        st.download_button("下载图片", img_bytes, f"img_{i}.jpg", "image/jpeg", key=f"img_dl_{i}")
-
-                with col3:
-                    with st.spinner("3. Veo 正在生成视频..."):
-                        video_data = generate_video_real(img_bytes, scene['camera'])
-                        st.video(video_data)
-                        st.download_button("下载视频", video_data, f"vid_{i}.mp4", "video/mp4", key=f"vid_dl_{i}")
-
-            st.balloons()
+        # 第一步：生成脚本
+        with st.spinner("1/3 DeepSeek 正在策划脚本..."):
+            scenes = get_ai_script(user_topic)
+        
+        if scenes:
+            st.success(f"✅ 脚本策划完成，共计 {len(scenes)} 个分镜")
             
-        except Exception as e:
-            st.error(f"运行出错：{str(e)}")
-            st.write("请检查 Secrets 中的 Key 是否有效，以及 Google 账号是否有 Veo 模型权限。")
+            # 第二步：根据脚本数量循环处理
+            for i, scene in enumerate(scenes):
+                st.markdown(f"---")
+                st.subheader(f"分镜 #{i+1}")
+                
+                col_txt, col_img, col_vid = st.columns([1, 2, 2])
+                
+                with col_txt:
+                    st.markdown("**📜 旁白文案**")
+                    st.info(scene['text'])
+                    st.write(f"🎥 **运镜:** {scene['camera']}")
+                    # 方便文哥复制
+                    st.text_area(f"复制文案 {i+1}", value=scene['text'], height=80, key=f"txt_{i}")
+
+                # 定义图片变量供视频生成使用
+                current_img_bytes = None
+
+                with col_img:
+                    with st.spinner("2/3 Nano Banana 绘图中..."):
+                        try:
+                            current_img_bytes = generate_image_real(scene['visual'])
+                            st.image(current_img_bytes, caption="生成的分镜母图")
+                            st.download_button("📥 下载图片", current_img_bytes, f"img_{i+1}.jpg", "image/jpeg", key=f"dl_img_{i}")
+                        except Exception as e:
+                            st.error(f"图片生成失败: {e}")
+
+                with col_vid:
+                    if current_img_bytes:
+                        with st.spinner("3/3 Veo 正在合成运镜视频..."):
+                            try:
+                                video_bytes = generate_video_real(current_img_bytes, scene['camera'])
+                                st.video(video_bytes)
+                                st.download_button("📥 下载视频", video_bytes, f"vid_{i+1}.mp4", "video/mp4", key=f"dl_vid_{i}")
+                            except Exception as e:
+                                st.error(f"视频生成失败: {e}")
+                                st.info("提示：请检查 Google 账号是否已获得 Veo 2.0 模型的使用权限。")
+            
+            st.balloons()
