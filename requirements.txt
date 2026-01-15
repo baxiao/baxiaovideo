@@ -1,4 +1,4 @@
 openai
 streamlit
-google-genai
+volcengine-python-sdk-ark
 requests
