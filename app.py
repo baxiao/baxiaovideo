@@ -3,97 +3,98 @@ import os
 import json
 import re
 from openai import OpenAI
+from volcenginesdkarkruntime import Ark
 
-# --- 1. 安全配置 (Secrets 读取) ---
+# --- 1. 初始化客户端 ---
 try:
-    DEEPSEEK_KEY = st.secrets["DEEPSEEK_API_KEY"]
-except Exception:
-    st.error("❌ 未在 Secrets 中找到 DEEPSEEK_API_KEY，请检查配置。")
+    # DeepSeek 客户端
+    ds_client = OpenAI(api_key=st.secrets["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    
+    # 豆包/火山引擎客户端 (使用 Ark SDK)
+    # 需安装: pip install volcengine-python-sdk-ark
+    ark_client = Ark(
+        ak=st.secrets["VOLC_ACCESS_KEY"],
+        sk=st.secrets["VOLC_SECRET_KEY"]
+    )
+except Exception as e:
+    st.error(f"配置加载失败，请检查 Secrets: {e}")
     st.stop()
 
-# 初始化 DeepSeek 客户端
-ds_client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
+st.set_page_config(page_title="豆包视频工厂", layout="wide")
+st.title("🎬 豆包 x DeepSeek 全自动视频工厂")
 
-st.set_page_config(page_title="短视频脚本策划专家", layout="wide")
-st.title("📑 短视频全自动脚本策划器")
-st.caption("专注文案生成、分镜描述与运镜脚本设计")
+# --- 2. 核心执行逻辑 ---
 
-# --- 2. 核心逻辑函数 ---
+def get_script(topic):
+    """DeepSeek 负责脚本大脑"""
+    prompt = f"策划主题为'{topic}'的短视频脚本，返回JSON数组，含text(文案), visual(画面描述), camera(英文运镜指令)。"
+    res = ds_client.chat.completions.create(model="deepseek-chat", messages=[{"role":"user", "content":prompt}])
+    match = re.search(r'\[.*\]', res.choices[0].message.content, re.DOTALL)
+    return json.loads(match.group(0)) if match else None
 
-def get_ai_script(topic, scene_count):
-    """调用 DeepSeek 生成深度分镜脚本数据"""
-    prompt = f"""
-    针对主题“{topic}”，策划一个包含 {scene_count} 个镜头的短视频脚本。
-    要求：
-    1. 逻辑严密，适合拍摄或AI视频生成。
-    2. 严格以 JSON 数组格式返回。
-    3. 每个对象包含字段：
-       - "scene_no": 序号 (居中展示),
-       - "text": 旁白/文案内容,
-       - "visual": 画面详细描述 (用于给AI绘图参考),
-       - "camera": 运镜指令 (如: 缓慢推近, 环绕上升, 侧向平移).
-    
-    注意：只输出 JSON 数据，不要任何解释。
-    """
+def generate_doubao_image(prompt):
+    """调用豆包图像生成模型 (CV)"""
     try:
-        response = ds_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}]
+        # 调用火山引擎图像生成大模型
+        response = ark_client.content_generation.create(
+            model=st.secrets["DOUBAO_IMAGE_ENDPOINT"],
+            prompt=prompt,
+            style="cinematic", # 设置为电影感风格
+            size="1280x720"
         )
-        raw_content = response.choices[0].message.content
-        
-        # 强力清洗 JSON 杂质
-        match = re.search(r'\[.*\]', raw_content, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        else:
-            return json.loads(raw_content.strip())
+        # 获取图片 URL 或 Base64
+        return response.data[0].url
     except Exception as e:
-        st.error(f"脚本生成失败: {e}")
+        st.error(f"豆包绘图失败: {e}")
+        return None
+
+def generate_doubao_video(image_url, camera_move):
+    """调用豆包视频生成模型 (Video Generation)"""
+    try:
+        response = ark_client.video_generation.create(
+            model=st.secrets["DOUBAO_VIDEO_ENDPOINT"],
+            image_url=image_url, # 豆包支持图生视频
+            prompt=f"Cinematic motion: {camera_move}, high quality, realistic.",
+        )
+        # 视频生成通常是异步的，此处简化展示逻辑
+        return response.data[0].url
+    except Exception as e:
+        st.warning(f"豆包视频生成暂不可用: {e}")
         return None
 
 # --- 3. 界面交互 ---
 
-with st.sidebar:
-    st.header("脚本参数设置")
-    scene_num = st.slider("分镜镜头数量", min_value=1, max_value=10, value=4)
-    st.info("💡 提示：暂停了图片和视频生成，专注文案创作。")
+user_topic = st.text_input("请输入视频主题：", "中国风水墨山水")
 
-user_topic = st.text_input("请输入视频主题（关键词或短句）：", placeholder="例如：讲述一个关于孤独与勇气的科幻故事")
-
-if st.button("🚀 开始策划脚本"):
-    if not user_topic:
-        st.warning("请先输入主题内容。")
-    else:
-        with st.spinner("DeepSeek 正在构思您的视频脚本..."):
-            scenes = get_ai_script(user_topic, scene_num)
+if st.button("🚀 启动豆包生产线"):
+    if user_topic:
+        with st.spinner("1. DeepSeek 正在构思脚本..."):
+            scenes = get_script(user_topic)
         
         if scenes:
-            st.success(f"✅ 脚本生成完成，共计 {len(scenes)} 个镜头。")
-            
-            # 使用表格形式展示，方便一眼扫视
-            for i, scene in enumerate(scenes):
-                st.markdown(f"### --- 分镜 {scene.get('scene_no', i+1)} ---")
-                
-                col1, col2 = st.columns([1, 1])
+            for i, s in enumerate(scenes):
+                st.divider()
+                st.subheader(f"分镜 #{i+1}")
+                col1, col2, col3 = st.columns([1, 2, 2])
                 
                 with col1:
-                    st.markdown("**🎙️ 旁白文案 (点击下方可复制)**")
-                    # 使用 text_area 方便用户全选复制
-                    st.text_area("文案内容", value=scene['text'], height=100, key=f"text_{i}")
-                    
-                    st.markdown("**🎥 运镜脚本**")
-                    st.code(scene['camera'], language="text")
+                    st.info(f"**文案:**\n{s['text']}")
+                    st.caption(f"运镜: {s['camera']}")
+                    st.text_area(f"复制文案 {i+1}", s['text'], height=70, key=f"t{i}")
 
+                img_url = None
                 with col2:
-                    st.markdown("**🖼️ 画面描述 (分镜镜头)**")
-                    # 这里是原来的绘图描述，保留用于给用户参考
-                    st.text_area("视觉参考描述", value=scene['visual'], height=150, key=f"vis_{i}")
-            
-            # 提供整体脚本下载
-            full_script_text = ""
-            for s in scenes:
-                full_script_text += f"分镜{s.get('scene_no', '')}\n文案：{s['text']}\n画面：{s['visual']}\n运镜：{s['camera']}\n\n"
-            
-            st.download_button("📥 导出完整脚本 (TXT)", full_script_text, f"{user_topic}_脚本.txt")
+                    with st.spinner("豆包绘图中..."):
+                        img_url = generate_doubao_image(s['visual'])
+                        if img_url:
+                            st.image(img_url, caption="豆包生成分镜图")
+                            st.download_button("下载图片", requests.get(img_url).content, f"i_{i}.jpg", key=f"di{i}")
+
+                with col3:
+                    if img_url:
+                        with st.spinner("豆包视频合成中..."):
+                            video_url = generate_doubao_video(img_url, s['camera'])
+                            if video_url:
+                                st.video(video_url)
+                                st.download_button("下载视频", requests.get(video_url).content, f"v_{i}.mp4", key=f"dv{i}")
             st.balloons()
