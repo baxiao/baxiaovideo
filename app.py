@@ -1,6 +1,12 @@
 import streamlit as st
 import os
 import requests
+import streamlit as st
+
+# 自动读取 Secrets
+deepseek_key = st.secrets["DEEPSEEK_API_KEY"]
+google_key = st.secrets["GOOGLE_API_KEY"]
+password = st.secrets["ACCESS_PASSWORD"]
 
 # 尝试导入，如果失败给出友好提示
 try:
